@@ -386,7 +386,7 @@ class ModulesController extends Controller
                     $user_locale = app()->getLocale();
 
                     $outputLog = new BufferedOutput();
-                    \Artisan::call('freescout:module-install', ['module_alias' => $alias], $outputLog);
+                    $install_status = \Artisan::call('freescout:module-install', ['module_alias' => $alias], $outputLog);
                     $output = $outputLog->fetch();
 
                     // Get module name
@@ -400,7 +400,10 @@ class ModulesController extends Controller
 
                     $type = 'danger';
                     $msg = __('Error occurred activating ":name" module', ['name' => $name]);
-                    if (session('flashes_floating') && is_array(session('flashes_floating'))) {
+                    if ($install_status !== 0) {
+                        \App\Module::setActive($alias, false);
+                        \Artisan::call('freescout:clear-cache');
+                    } elseif (session('flashes_floating') && is_array(session('flashes_floating'))) {
                         // If there was any error, module has been deactivated via modules.register_error filter
                         $msg = '';
                         foreach (session('flashes_floating') as $flash) {
@@ -415,30 +418,23 @@ class ModulesController extends Controller
                         \Artisan::call('freescout:clear-cache');
                     }
 
-                    // Check public folder.
-                    if ($module && file_exists($module->getPath().DIRECTORY_SEPARATOR.'Public')) {
-                        $symlink_path = public_path().\Module::getPublicPath($alias);
-                        if (!file_exists($symlink_path)) {
-                            $type = 'danger';
-                            $msg = 'Error occurred creating a module symlink ('.$symlink_path.'). Please check folder permissions.';
-                            \App\Module::setActive($alias, false);
-                            \Artisan::call('freescout:clear-cache');
-                        }
-                    }
-
                     if ($type == 'success') {
                         // Migrate again, in case migration did not work in the moment the module was activated.
                         \Artisan::call('migrate', ['--force' => true]);
                     }
 
-                    // \Session::flash does not work after BufferedOutput
-                    $flash = [
-                        'text'      => '<strong>'.$msg.'</strong><pre class="margin-top">'.$output.'</pre>',
-                        'unescaped' => true,
-                        'type'      => $type,
-                    ];
-                    \Cache::forever('modules_flash', $flash);
-                    $response['status'] = 'success';
+                    if ($type == 'success') {
+                        // \Session::flash does not work after BufferedOutput
+                        $flash = [
+                            'text'      => '<strong>'.$msg.'</strong><pre class="margin-top">'.$output.'</pre>',
+                            'unescaped' => true,
+                            'type'      => $type,
+                        ];
+                        \Cache::forever('modules_flash', $flash);
+                        $response['status'] = 'success';
+                    } else {
+                        $response['msg'] = '<strong>'.htmlspecialchars($msg, ENT_QUOTES, 'UTF-8').'</strong><pre class="margin-top">'.htmlspecialchars($output, ENT_QUOTES, 'UTF-8').'</pre>';
+                    }
                 }
 
                 break;
@@ -574,14 +570,18 @@ class ModulesController extends Controller
                         $msg = $update_result['msg_success'];
                     }
 
-                    // \Session::flash does not work after BufferedOutput
-                    $flash = [
-                        'text'      => '<strong>'.$msg.'</strong><pre class="margin-top">'.$update_result['output'].'</pre>',
-                        'unescaped' => true,
-                        'type'      => $type,
-                    ];
-                    \Cache::forever('modules_flash', $flash);
-                    $response['status'] = 'success';
+                    if ($type == 'success') {
+                        // \Session::flash does not work after BufferedOutput
+                        $flash = [
+                            'text'      => '<strong>'.$msg.'</strong><pre class="margin-top">'.$update_result['output'].'</pre>',
+                            'unescaped' => true,
+                            'type'      => $type,
+                        ];
+                        \Cache::forever('modules_flash', $flash);
+                        $response['status'] = 'success';
+                    } else {
+                        $response['msg'] = '<strong>'.htmlspecialchars($msg, ENT_QUOTES, 'UTF-8').'</strong><pre class="margin-top">'.htmlspecialchars($update_result['output'], ENT_QUOTES, 'UTF-8').'</pre>';
+                    }
                 }
 
                 break;

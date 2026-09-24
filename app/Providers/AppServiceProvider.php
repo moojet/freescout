@@ -54,12 +54,35 @@ class AppServiceProvider extends ServiceProvider
             redirect(\Helper::getSubdirectory().'/install.php')->send();
         }
 
-        // Process module registration error - disable module and show error to admin
+        // Process module registration errors and recover missing declared providers.
         \Eventy::addFilter('modules.register_error', function ($exception, $module) {
-
+            $provider = $this->getMissingModuleProvider($exception, $module);
             $msg = __('The :module_name module has been deactivated due to an error: :error_message', ['module_name' => $module->getName(), 'error_message' => $exception->getMessage()]);
 
-            \Log::error($msg);
+            if ($provider) {
+                \Log::error($msg);
+
+                \App\Module::setActive($module->getAlias(), false);
+                \App\Module::$modules = null;
+                \Nwidart\Modules\Repository::$active_cache = [];
+                \Module::clearCache();
+                $module->json()->set('active', 0);
+
+                if (!app()->runningInConsole()) {
+                    \Session::flash('flashes_floating', [[
+                        'text' => $msg,
+                        'type' => 'danger',
+                        'role' => \App\User::ROLE_ADMIN,
+                    ]]);
+                }
+
+                return;
+            }
+
+            // The original registration boundary caught Exception, not Error.
+            if (!$exception instanceof \Exception) {
+                return $exception;
+            }
 
             // request() does is empty at this stage
             if (!empty($_POST['action']) && $_POST['action'] == 'activate') {
@@ -92,5 +115,27 @@ class AppServiceProvider extends ServiceProvider
 
             return $exception;
         }, 10, 2);
+    }
+
+    /**
+     * Return the declared provider class missing from a module registration.
+     *
+     * @param \Throwable $exception
+     * @param mixed $module
+     *
+     * @return string|null
+     */
+    private function getMissingModuleProvider(\Throwable $exception, $module)
+    {
+        if (!$exception instanceof \Error || !preg_match('/^Class\\s+["\']?([^"\']+)["\']?\\s+not found$/', $exception->getMessage(), $matches)) {
+            return;
+        }
+
+        $missingClass = ltrim($matches[1], '\\');
+        foreach ((array) $module->get('providers', []) as $provider) {
+            if (ltrim($provider, '\\') === $missingClass) {
+                return $provider;
+            }
+        }
     }
 }
