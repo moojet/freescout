@@ -303,38 +303,9 @@ class Module extends Model
         }
         if ($module_aliases && count($module_aliases)) {
             foreach ($module_aliases as $module_alias) {
-                $from = self::getSymlinkPath($module_alias);
-
-                $create = false;
-
-                // file_exists() also checks if symlink target exists.
-                // file_exists() and is_dir() may throw "open_basedir restriction in effect".
-                try {
-                    if (!file_exists($from) || !is_link($from)) {
-                        if (is_dir($from)) {
-                            @rename($from, $from.'_'.date('YmdHis'));
-                        } else {
-                            @unlink($from);
-                        }
-                        $create = true;
-                    } 
-                } catch (\Exception $e) {
-                    $create = true;
-                }
-
-                // Skip this check.
-                // elseif (is_link($from) && readlink($symlink_path) != '') {
-                //     // Symlink leads to the wrong place.
-                //     $create = true;
-                // }
-
-                // Try to create the symlink.
-                if ($create) {
-                    $to = self::createModuleSymlink($module_alias);
-
-                    if ($to && (!is_link($from) || is_link($to) || !file_exists($from))) {
-                        $invalid_symlinks[$from] = $to;
-                    }
+                $result = self::ensureModulePublicSymlink($module_alias);
+                if (!$result['success']) {
+                    $invalid_symlinks[$result['from']] = $result['to'];
                 }
             }
         }
@@ -342,58 +313,108 @@ class Module extends Model
         return $invalid_symlinks;
     }
 
-    // There is similar function in ModuleInstall.php
-    public static function createModuleSymlink($alias)
+    /**
+     * Ensure a module alias resolves to its Public directory.
+     *
+     * @param string $alias
+     *
+     * @return array
+     */
+    public static function ensureModulePublicSymlink($alias)
     {
         $from = self::getSymlinkPath($alias);
 
         $module = \Module::findByAlias($alias);
         if (!$module) {
-            return false;
+            return self::moduleSymlinkResult(false, $from, '', 'Module not found: '.$alias);
         }
 
         $to = $module->getExtraPath('Public');
 
-        // file_exists() may throw "open_basedir restriction in effect".
+        return self::ensurePublicSymlink($from, $to);
+    }
+
+    /**
+     * Ensure an alias path resolves to a module Public directory.
+     *
+     * @param string $from
+     * @param string $to
+     *
+     * @return array
+     */
+    public static function ensurePublicSymlink($from, $to)
+    {
+
         try {
-            // If module's Public is symlink.
-            if (is_link($to)) {
-                @unlink($to);
+            $target = @realpath($to);
+            if ($target === false || !@is_dir($target)) {
+                return self::moduleSymlinkResult(false, $from, $to, 'Module assets directory is missing or invalid');
             }
 
-            // Symlimk may exist but lead to the module folder in a wrong case.
-            // So we need first try to remove it.
-            if (!file_exists($from)) {
-                @unlink($from);
-            }
-
-            if (file_exists($from)) {
-                return $to;
-            }
-
-            if (!file_exists($to)) {
-                // Try to create Public folder.
-                try {
-                    \File::makeDirectory($to, \Helper::DIR_PERMISSIONS);
-                } catch (\Exception $e) {
-                    // If it's a broken symlink.
-                    if (is_link($to)) {
-                        @unlink($to);
-                    }
+            if (@is_link($from)) {
+                $current_target = @realpath($from);
+                if ($current_target === $target && @is_dir($current_target)) {
+                    return self::moduleSymlinkResult(true, $from, $to, 'Public symlink already resolves to the module assets directory');
                 }
+
+                if (!@unlink($from)) {
+                    return self::moduleSymlinkResult(false, $from, $to, 'Unable to replace the mismatched module public symlink');
+                }
+            } elseif (@file_exists($from) || @is_dir($from)) {
+                return self::moduleSymlinkResult(false, $from, $to, 'Module public path exists and is not a symlink');
             }
 
-            try {
-                symlink($to, $from);
-            } catch (\Exception $e) {
-                \Log::error('Error occurred creating ['.$from.' » '.$to.'] symlink: '.$e->getMessage());
-                //return false;
+            if (!@is_dir(dirname($from))) {
+                return self::moduleSymlinkResult(false, $from, $to, 'Module public parent directory does not exist');
             }
-        } catch (\Exception $e) {
-            return false;
+
+            if (!@symlink($to, $from)) {
+                return self::moduleSymlinkResult(false, $from, $to, 'Unable to create the module public symlink');
+            }
+
+            $created_target = @realpath($from);
+            if (!@is_link($from) || $created_target === false || $created_target !== $target || !@is_dir($created_target)) {
+                if (@is_link($from)) {
+                    @unlink($from);
+                }
+
+                return self::moduleSymlinkResult(false, $from, $to, 'Created module public symlink does not resolve to the module assets directory');
+            }
+        } catch (\Throwable $e) {
+            \Log::error('Error occurred creating ['.$from.' » '.$to.'] symlink: '.$e->getMessage());
+
+            return self::moduleSymlinkResult(false, $from, $to, $e->getMessage());
         }
 
-        return $to;
+        return self::moduleSymlinkResult(true, $from, $to, 'Module public symlink created');
+    }
+
+    // There is similar function in ModuleInstall.php
+    public static function createModuleSymlink($alias)
+    {
+        $result = self::ensureModulePublicSymlink($alias);
+
+        return $result['success'] ? $result['to'] : false;
+    }
+
+    /**
+     * Build a consistent module symlink operation result.
+     *
+     * @param bool   $success
+     * @param string $from
+     * @param string $to
+     * @param string $message
+     *
+     * @return array
+     */
+    private static function moduleSymlinkResult($success, $from, $to, $message)
+    {
+        return [
+            'success' => $success,
+            'from'    => $from,
+            'to'      => $to,
+            'message' => $message,
+        ];
     }
 
     public static function updateModule($alias)
@@ -465,12 +486,15 @@ class Module extends Model
         // Run post-update instructions.
         if (!$result['msg'] && !$result['download_error']) {
             $output_log = new BufferedOutput();
-            \Artisan::call('freescout:module-install', ['module_alias' => $alias], $output_log);
+            $install_status = \Artisan::call('freescout:module-install', ['module_alias' => $alias], $output_log);
             $result['output'] = $output_log->fetch() ?: ' ';
 
             $result['msg'] = __('Error occurred activating ":name" module', ['name' => $name]);
 
-            if (session('flashes_floating') && is_array(session('flashes_floating'))) {
+            if ($install_status !== 0) {
+                self::setActive($alias, false);
+                \Artisan::call('freescout:clear-cache');
+            } elseif (session('flashes_floating') && is_array(session('flashes_floating'))) {
                 // Error.
                 // If there was any error, module has been deactivated via modules.register_error filter
                 $result['msg'] = '';

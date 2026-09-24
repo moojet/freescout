@@ -38,6 +38,13 @@ abstract class Module extends ServiceProvider
     protected $moduleJson = [];
 
     /**
+     * Indicates that registration was stopped after a recoverable module error.
+     *
+     * @var bool
+     */
+    protected $registrationFailed = false;
+
+    /**
      * The constructor.
      *
      * @param Container $app
@@ -170,18 +177,17 @@ abstract class Module extends ServiceProvider
      */
     public function boot()
     {
+        if ($this->registrationFailed) {
+            return;
+        }
+
         if (config('modules.register.translations', true) === true) {
             $this->registerTranslation();
         }
 
         if ($this->isLoadFilesOnBoot()) {
-            try {
-                $this->registerFiles();
-            } catch (\Exception $e) {
-                $e = \Eventy::filter('modules.register_error', $e, $this);
-                if ($e) {
-                    throw $e;
-                }
+            if (!$this->registerFiles()) {
+                return;
             }
         }
 
@@ -276,16 +282,23 @@ abstract class Module extends ServiceProvider
         $this->registerAliases();
 
         try {
+            $this->validateProviders();
             $this->registerProviders();
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $e = \Eventy::filter('modules.register_error', $e, $this);
             if ($e) {
                 throw $e;
             }
+
+            $this->registrationFailed = true;
+
+            return;
         }
 
         if ($this->isLoadFilesOnBoot() === false) {
-            $this->registerFiles();
+            if (!$this->registerFiles()) {
+                return;
+            }
         }
 
         $this->fireEvent('register');
@@ -319,6 +332,20 @@ abstract class Module extends ServiceProvider
     abstract public function getCachedServicesPath();
 
     /**
+     * Ensure provider classes declared in the module manifest can be loaded.
+     *
+     * @return void
+     */
+    protected function validateProviders()
+    {
+        foreach ((array) $this->get('providers', []) as $provider) {
+            if (is_string($provider) && !class_exists($provider)) {
+                throw new \Error('Class "'.$provider.'" not found');
+            }
+        }
+    }
+
+    /**
      * Register the files from this module.
      */
     protected function registerFiles()
@@ -327,12 +354,18 @@ abstract class Module extends ServiceProvider
             foreach ($this->get('files', []) as $file) {
                 include $this->path.'/'.$file;
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $e = \Eventy::filter('modules.register_error', $e, $this);
             if ($e) {
                 throw $e;
             }
+
+            $this->registrationFailed = true;
+
+            return false;
         }
+
+        return true;
     }
 
     /**
